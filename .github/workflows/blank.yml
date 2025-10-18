@@ -1,40 +1,28 @@
-name: Run inline GraphQL query
+name: Debug repo existence
 
 on:
   workflow_dispatch:
 
 jobs:
-  run-graphql:
+  check-repo:
     runs-on: ubuntu-latest
-    env:
-      QUERY: |
-        {
-          repository(owner: "Junpei-000", name: "Jprivate-organization") {
-            projectV2(number: 1) {
-              title
-            }
-          }
-        }
     steps:
-      - name: Run GraphQL query
+      - name: Check repo via REST and print result
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
+
           TOKEN="${{ secrets.MY_PAT }}"
           if [ -z "$TOKEN" ]; then
             TOKEN="${{ secrets.GITHUB_TOKEN }}"
           fi
 
-          payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
-          http_code=$(curl -s -o result.json -w "%{http_code}" \
+          http_code=$(curl -s -o repo.json -w "%{http_code}" \
             -H "Authorization: bearer $TOKEN" \
-            -H "Content-Type: application/json" \
-            -X POST https://api.github.com/graphql -d "$payload")
+            https://github.com/Jprivate-organization/projects_test)
 
           echo "HTTP status: $http_code"
-          jq . result.json || cat result.json
-      - name: Upload result.json
-        uses: actions/upload-artifact@v4
-        with:
-          name: result-json
-          path: result.json
+          echo "---- raw JSON ----"
+          cat repo.json || true
+          echo "---- pretty JSON ----"
+          jq . repo.json || true
