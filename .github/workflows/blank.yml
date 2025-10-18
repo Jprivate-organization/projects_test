@@ -37,58 +37,52 @@ jobs:
           echo "owner=$OWNER" >> $GITHUB_OUTPUT
           echo "repo=$REPO" >> $GITHUB_OUTPUT
 
-      - name: Query projectsV2 (GraphQL)
+           - name: Query projectsV2 (GraphQL)
+        id: query_v2
         run: |
           OWNER="${{ steps.split.outputs.owner }}"
           REPO="${{ steps.split.outputs.repo }}"
           TOKEN="${{ secrets.MY_PAT }}"
           if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
 
-          read -r -d '' Q <<'GRAPHQL' || true
+          # 変数展開ありの heredoc（% による副作用なし）
+          read -r -d '' QUERY <<GRAPHQL || true
           {
-            repository(owner: "%s", name: "%s") {
+            repository(owner: "$OWNER", name: "$REPO") {
               projectsV2(first: 100) {
                 nodes { id number title }
               }
             }
           }
 GRAPHQL
-          QUERY=$(printf "$Q" "$OWNER" "$REPO")
+
           payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
-          curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
-            -X POST https://api.github.com/graphql -d "$payload" -o projectsv2.json
+          curl -s -H "Authorization: bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+            -H "Content-Type: application/json" -X POST https://api.github.com/graphql -d "$payload" -o projectsv2.json
 
           echo "---- projectsV2 raw ----"
           cat projectsv2.json || true
           echo "---- projectsV2 pretty ----"
           jq . projectsv2.json || true
 
-          cnt=$(jq '.data.repository.projectsV2.nodes | length // 0' projectsv2.json)
-          echo "count=$cnt" > cnt.txt
-          cat cnt.txt
-          echo "::set-output name=v2_count::$cnt"
+          cnt=$(jq -r '.data.repository.projectsV2.nodes // [] | length' projectsv2.json)
+          echo "v2_count=$cnt" >> $GITHUB_OUTPUT
 
       - name: If projectsV2 found — fetch each project detail
-        if: ${{ fromJson(steps.get-projects.outputs.v2_count || steps.get-projects.outputs.count)  != 0 || (steps.get-projects.outputs.v2_count != '' && steps.get-projects.outputs.v2_count != '0') }}
+        if: ${{ steps.query_v2.outputs.v2_count != '0' }}
         run: |
-          # Note: GitHub Actions deprecated set-output in some contexts; we re-evaluate from file
           OWNER="${{ steps.split.outputs.owner }}"
           REPO="${{ steps.split.outputs.repo }}"
           TOKEN="${{ secrets.MY_PAT }}"
           if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
 
-          cnt=$(jq '.data.repository.projectsV2.nodes | length // 0' projectsv2.json)
-          if [ "$cnt" -eq 0 ]; then
-            echo "No projectsV2 found, skipping details"
-            exit 0
-          fi
-
+          # for ループで各 project number を取り出して heredoc でクエリ作成（printf を使わない）
           for num in $(jq -r '.data.repository.projectsV2.nodes[].number' projectsv2.json); do
             echo "Fetching projectV2 number: $num"
-            read -r -d '' PQ <<'GRAPHQL' || true
+            read -r -d '' QUERY <<GRAPHQL || true
             {
-              repository(owner: "%s", name: "%s") {
-                projectV2(number: %s) {
+              repository(owner: "$OWNER", name: "$REPO") {
+                projectV2(number: $num) {
                   id
                   number
                   title
@@ -103,7 +97,6 @@ GRAPHQL
               }
             }
 GRAPHQL
-            QUERY=$(printf "$PQ" "$OWNER" "$REPO" "$num")
             payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
             curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
               -X POST https://api.github.com/graphql -d "$payload" -o "project_${num}.json"
@@ -112,7 +105,7 @@ GRAPHQL
           done
 
       - name: If no projectsV2 — list classic Projects via REST
-        if: ${{ always() && (jq('.data.repository.projectsV2.nodes | length // 0' projectsv2.json) == 0) }}
+        if: ${{ steps.query_v2.outputs.v2_count == '0' }}
         run: |
           OWNER="${{ steps.split.outputs.owner }}"
           REPO="${{ steps.split.outputs.repo }}"
@@ -121,7 +114,6 @@ GRAPHQL
 
           URL="https://api.github.com/repos/${OWNER}/${REPO}/projects"
           echo "Requesting classic projects: $URL"
-          # classic Projects REST often needs the inertia preview Accept header
           curl -sS -H "Authorization: bearer $TOKEN" -H "Accept: application/vnd.github.inertia-preview+json" "$URL" -o classic_projects.json || true
           echo "---- classic projects raw ----"
           cat classic_projects.json || true
