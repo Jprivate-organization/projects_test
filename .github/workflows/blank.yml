@@ -1,13 +1,51 @@
-name: Debug repo existence
+name: Run GraphQL query (inline)
 
 on:
   workflow_dispatch:
 
 jobs:
-  check-repo:
+  run-graphql:
     runs-on: ubuntu-latest
+    env:
+      QUERY: |
+        {
+          repository(owner: "Jprivate-organization", name: "projects_test") {
+            projectV2(number: 1) {
+              title
+              fields(first: 1) {
+                nodes {
+                  ... on ProjectV2Field {
+                    name
+                    dataType
+                  }
+                  ... on ProjectV2SingleSelectField {
+                    name
+                    options {
+                      name
+                      id
+                    }
+                  }
+                }
+              }
+              items(first: 5) {
+                nodes {
+                  content {
+                    ... on Issue {
+                      title
+                      number
+                      state
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
     steps:
-      - name: Check repo via REST and print result
+      - name: Run GraphQL query and print result
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
@@ -17,12 +55,13 @@ jobs:
             TOKEN="${{ secrets.GITHUB_TOKEN }}"
           fi
 
-          http_code=$(curl -s -o repo.json -w "%{http_code}" \
-            -H "Authorization: bearer $TOKEN" \
-            https://github.com/Jprivate-organization/projects_test)
+          payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
+          curl -s -H "Authorization: bearer $TOKEN" \
+               -H "Content-Type: application/json" \
+               -X POST https://api.github.com/graphql \
+               -d "$payload" -o result.json
 
-          echo "HTTP status: $http_code"
-          echo "---- raw JSON ----"
-          cat repo.json || true
+          echo "---- raw result ----"
+          cat result.json || true
           echo "---- pretty JSON ----"
-          jq . repo.json || true
+          jq . result.json || true
