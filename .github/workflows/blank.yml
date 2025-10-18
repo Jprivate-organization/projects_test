@@ -1,93 +1,129 @@
-name: Get ProjectsV2 info
+name: Get repository Projects (auto-detect V2)
 
 on:
   workflow_dispatch:
     inputs:
-      project_number:
-        description: '（任意）詳細を取得する projectV2 の number'
-        required: false
-        default: ''
+      repo:
+        description: 'owner/repo (例: Jprivate-organization/projects_test)'
+        required: true
+        default: 'Jprivate-organization/projects_test'
 
 jobs:
-  projects-v2:
+  get-projects:
     runs-on: ubuntu-latest
-    env:
-      OWNER: "Jprivate-organization"
-      REPO: "projects_test"
-      LIST_QUERY: |
-        {
-          repository(owner: "Jprivate-organization", name: "projects_test") {
-            projectsV2(first: 100) {
-              nodes {
-                id
-                number
-                title
-              }
-            }
-          }
-        }
-      DETAIL_QUERY_TEMPLATE: |
-        {
-          repository(owner: "Jprivate-organization", name: "projects_test") {
-            projectV2(number: %d) {
-              id
-              number
-              title
-              fields(first: 50) {
-                nodes {
-                  ... on ProjectV2Field { id name dataType }
-                  ... on ProjectV2SingleSelectField { id name options { id name } }
-                }
-              }
-              items(first: 100) {
-                nodes {
-                  id
-                  content {
-                    __typename
-                    ... on Issue { title number state author { login } }
-                    ... on PullRequest { title number state author { login } }
-                  }
-                }
-              }
-            }
-          }
-        }
     steps:
       - name: Install jq
         run: sudo apt-get update -y && sudo apt-get install -y jq
 
       - name: Prepare token
+        id: token
         run: |
           TOKEN="${{ secrets.MY_PAT }}"
-          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          fi
           if [ -z "$TOKEN" ]; then
             echo "ERROR: token not provided. Set secrets.MY_PAT or ensure GITHUB_TOKEN is available."
             exit 1
           fi
-          echo "::set-output name=token::$TOKEN"
-        id: prepare
+          echo "token_len=${#TOKEN}" >> $GITHUB_OUTPUT
 
-      - name: List ProjectsV2
+      - name: Split owner/repo
+        id: split
         run: |
-          TOKEN="${{ steps.prepare.outputs.token }}"
-          payload=$(jq -Rn --arg q "$LIST_QUERY" '{query: $q}')
-          curl -sS -H "Authorization: bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" -X POST https://api.github.com/graphql -d "$payload" -o list.json
-          echo "---- projects list (raw) ----"
-          cat list.json || true
-          echo "---- projects list (pretty) ----"
-          jq . list.json || true
+          I="${{ github.event.inputs.repo }}"
+          OWNER="${I%%/*}"
+          REPO="${I##*/}"
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+          echo "repo=$REPO" >> $GITHUB_OUTPUT
 
-      - name: Get project detail (if provided)
-        if: ${{ github.event.inputs.project_number != '' }}
+      - name: Query projectsV2 (GraphQL)
         run: |
-          TOKEN="${{ steps.prepare.outputs.token }}"
-          NUM=${{ github.event.inputs.project_number }}
-          QUERY=$(printf "$DETAIL_QUERY_TEMPLATE" "$NUM")
+          OWNER="${{ steps.split.outputs.owner }}"
+          REPO="${{ steps.split.outputs.repo }}"
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+
+          read -r -d '' Q <<'GRAPHQL' || true
+          {
+            repository(owner: "%s", name: "%s") {
+              projectsV2(first: 100) {
+                nodes { id number title }
+              }
+            }
+          }
+GRAPHQL
+          QUERY=$(printf "$Q" "$OWNER" "$REPO")
           payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
-          curl -sS -H "Authorization: bearer $TOKEN" -H "Accept: application/vnd.github+json" \
-            -H "Content-Type: application/json" -X POST https://api.github.com/graphql -d "$payload" -o project.json
-          echo "---- project detail (raw) ----"
-          cat project.json || true
-          echo "---- project detail (pretty) ----"
-          jq . project.json || true
+          curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
+            -X POST https://api.github.com/graphql -d "$payload" -o projectsv2.json
+
+          echo "---- projectsV2 raw ----"
+          cat projectsv2.json || true
+          echo "---- projectsV2 pretty ----"
+          jq . projectsv2.json || true
+
+          cnt=$(jq '.data.repository.projectsV2.nodes | length // 0' projectsv2.json)
+          echo "count=$cnt" > cnt.txt
+          cat cnt.txt
+          echo "::set-output name=v2_count::$cnt"
+
+      - name: If projectsV2 found — fetch each project detail
+        if: ${{ fromJson(steps.get-projects.outputs.v2_count || steps.get-projects.outputs.count)  != 0 || (steps.get-projects.outputs.v2_count != '' && steps.get-projects.outputs.v2_count != '0') }}
+        run: |
+          # Note: GitHub Actions deprecated set-output in some contexts; we re-evaluate from file
+          OWNER="${{ steps.split.outputs.owner }}"
+          REPO="${{ steps.split.outputs.repo }}"
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+
+          cnt=$(jq '.data.repository.projectsV2.nodes | length // 0' projectsv2.json)
+          if [ "$cnt" -eq 0 ]; then
+            echo "No projectsV2 found, skipping details"
+            exit 0
+          fi
+
+          for num in $(jq -r '.data.repository.projectsV2.nodes[].number' projectsv2.json); do
+            echo "Fetching projectV2 number: $num"
+            read -r -d '' PQ <<'GRAPHQL' || true
+            {
+              repository(owner: "%s", name: "%s") {
+                projectV2(number: %s) {
+                  id
+                  number
+                  title
+                  fields(first: 50) { nodes { ... on ProjectV2Field { name dataType } ... on ProjectV2SingleSelectField { name options { id name } } } }
+                  items(first: 50) {
+                    nodes {
+                      id
+                      content { __typename ... on Issue { number title state } ... on PullRequest { number title state } }
+                    }
+                  }
+                }
+              }
+            }
+GRAPHQL
+            QUERY=$(printf "$PQ" "$OWNER" "$REPO" "$num")
+            payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
+            curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
+              -X POST https://api.github.com/graphql -d "$payload" -o "project_${num}.json"
+            echo "---- project ${num} ----"
+            jq . "project_${num}.json" || cat "project_${num}.json"
+          done
+
+      - name: If no projectsV2 — list classic Projects via REST
+        if: ${{ always() && (jq('.data.repository.projectsV2.nodes | length // 0' projectsv2.json) == 0) }}
+        run: |
+          OWNER="${{ steps.split.outputs.owner }}"
+          REPO="${{ steps.split.outputs.repo }}"
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+
+          URL="https://api.github.com/repos/${OWNER}/${REPO}/projects"
+          echo "Requesting classic projects: $URL"
+          # classic Projects REST often needs the inertia preview Accept header
+          curl -sS -H "Authorization: bearer $TOKEN" -H "Accept: application/vnd.github.inertia-preview+json" "$URL" -o classic_projects.json || true
+          echo "---- classic projects raw ----"
+          cat classic_projects.json || true
+          echo "---- classic projects pretty ----"
+          jq . classic_projects.json || echo "no classic projects or not allowed"
