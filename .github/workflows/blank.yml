@@ -1,43 +1,45 @@
-name: Run GraphQL query (inline)
+name: Query org ProjectsV2
 
 on:
   workflow_dispatch:
+    inputs:
+      project_number:
+        description: '（任意）個別の projectV2 number を指定すると詳細も取得'
+        required: false
+        default: ''
 
 jobs:
-  run-graphql:
+  query-projects:
     runs-on: ubuntu-latest
     env:
-      QUERY: |
+      ORG: "Jprivate-organization"
+      LIST_QUERY: |
         {
-          repository(owner: "Jprivate-organization", name: "projects_test") {
-            projectV2(number: 1) {
-              title
-              fields(first: 1) {
-                nodes {
-                  ... on ProjectV2Field {
-                    name
-                    dataType
-                  }
-                  ... on ProjectV2SingleSelectField {
-                    name
-                    options {
-                      name
-                      id
-                    }
-                  }
-                }
+          organization(login: "Jprivate-organization") {
+            projectsV2(first: 100) {
+              nodes {
+                id
+                number
+                title
               }
-              items(first: 5) {
+            }
+          }
+        }
+      PROJECT_QUERY_TEMPLATE: |
+        {
+          organization(login: "Jprivate-organization") {
+            projectV2(number: %d) {
+              id
+              number
+              title
+              fields(first: 20) { nodes { ... on ProjectV2Field { name dataType } } }
+              items(first: 20) {
                 nodes {
+                  id
                   content {
-                    ... on Issue {
-                      title
-                      number
-                      state
-                      author {
-                        login
-                      }
-                    }
+                    __typename
+                    ... on Issue { title number state author { login } }
+                    ... on PullRequest { title number state author { login } }
                   }
                 }
               }
@@ -45,23 +47,50 @@ jobs:
           }
         }
     steps:
-      - name: Run GraphQL query and print result
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y jq
+      - name: Install jq
+        run: sudo apt-get update -y && sudo apt-get install -y jq
 
+      - name: Prepare token
+        id: token
+        run: |
           TOKEN="${{ secrets.MY_PAT }}"
           if [ -z "$TOKEN" ]; then
             TOKEN="${{ secrets.GITHUB_TOKEN }}"
           fi
+          if [ -z "$TOKEN" ]; then
+            echo "error=TOKEN_EMPTY" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          echo "token_len=${#TOKEN}" >> $GITHUB_OUTPUT
 
+      - name: List organization ProjectsV2
+        run: |
+          TOKEN="$(jq -r .token_len <<< '{"token_len":'${{ steps.token.outputs.token_len}}'}' 2>/dev/null >/dev/null || true)"
+          # use same token retrieval to keep simple
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+
+          payload=$(jq -Rn --arg q "$LIST_QUERY" '{query: $q}')
+          curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
+            -X POST https://api.github.com/graphql -d "$payload" -o list.json
+          echo "---- org projects (raw) ----"
+          cat list.json || true
+          echo "---- org projects (pretty) ----"
+          jq . list.json || true
+
+      - name: Fetch specified project (if provided)
+        if: ${{ github.event.inputs.project_number != '' }}
+        run: |
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then TOKEN="${{ secrets.GITHUB_TOKEN }}"; fi
+
+          NUM=${{ github.event.inputs.project_number }}
+          # build query by replacing %d
+          QUERY=$(printf "$PROJECT_QUERY_TEMPLATE" "$NUM")
           payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
-          curl -s -H "Authorization: bearer $TOKEN" \
-               -H "Content-Type: application/json" \
-               -X POST https://api.github.com/graphql \
-               -d "$payload" -o result.json
-
-          echo "---- raw result ----"
-          cat result.json || true
-          echo "---- pretty JSON ----"
-          jq . result.json || true
+          curl -s -H "Authorization: bearer $TOKEN" -H "Content-Type: application/json" \
+            -X POST https://api.github.com/graphql -d "$payload" -o project.json
+          echo "---- project (raw) ----"
+          cat project.json || true
+          echo "---- project (pretty) ----"
+          jq . project.json || true
