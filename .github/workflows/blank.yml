@@ -12,35 +12,6 @@ jobs:
           repository(owner: "Junpei-000", name: "Jprivate-organization") {
             projectV2(number: 1) {
               title
-              fields(first: 1) {
-                nodes {
-                  ... on ProjectV2Field {
-                    name
-                    dataType
-                  }
-                  ... on ProjectV2SingleSelectField {
-                    name
-                    options {
-                      name
-                      id
-                    }
-                  }
-                }
-              }
-              items(first: 5) {
-                nodes {
-                  content {
-                    ... on Issue {
-                      title
-                      number
-                      state
-                      author {
-                        login
-                      }
-                    }
-                  }
-                }
-              }
             }
           }
         }
@@ -49,17 +20,21 @@ jobs:
         run: |
           sudo apt-get update -y
           sudo apt-get install -y jq
-          # 優先: secrets.MY_PAT があれば使い、なければ GITHUB_TOKEN を使う
           TOKEN="${{ secrets.MY_PAT }}"
           if [ -z "$TOKEN" ]; then
             TOKEN="${{ secrets.GITHUB_TOKEN }}"
           fi
 
           payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
-          curl -s -H "Authorization: bearer $TOKEN" \
-               -H "Content-Type: application/json" \
-               -X POST https://api.github.com/graphql \
-               -d "$payload" > result.json
+          http_code=$(curl -s -o result.json -w "%{http_code}" \
+            -H "Authorization: bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            -X POST https://api.github.com/graphql -d "$payload")
 
-          echo "Saved result.json"
+          echo "HTTP status: $http_code"
           jq . result.json || cat result.json
+      - name: Upload result.json
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-json
+          path: result.json
