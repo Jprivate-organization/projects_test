@@ -1,0 +1,65 @@
+name: Run inline GraphQL query
+
+on:
+  workflow_dispatch:
+
+jobs:
+  run-graphql:
+    runs-on: ubuntu-latest
+    env:
+      QUERY: |
+        {
+          repository(owner: "Junpei-000", name: "Jprivate-organization") {
+            projectV2(number: 1) {
+              title
+              fields(first: 1) {
+                nodes {
+                  ... on ProjectV2Field {
+                    name
+                    dataType
+                  }
+                  ... on ProjectV2SingleSelectField {
+                    name
+                    options {
+                      name
+                      id
+                    }
+                  }
+                }
+              }
+              items(first: 5) {
+                nodes {
+                  content {
+                    ... on Issue {
+                      title
+                      number
+                      state
+                      author {
+                        login
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+    steps:
+      - name: Run GraphQL query
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          # 優先: secrets.MY_PAT があれば使い、なければ GITHUB_TOKEN を使う
+          TOKEN="${{ secrets.MY_PAT }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          fi
+
+          payload=$(jq -Rn --arg q "$QUERY" '{query: $q}')
+          curl -s -H "Authorization: bearer $TOKEN" \
+               -H "Content-Type: application/json" \
+               -X POST https://api.github.com/graphql \
+               -d "$payload" > result.json
+
+          echo "Saved result.json"
+          jq . result.json || cat result.json
